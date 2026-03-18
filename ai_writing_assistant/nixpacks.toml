@@ -1,4 +1,3 @@
-# nixpacks.toml
 [phases.setup]
 nixPkgs = ["python313"]
 
@@ -6,7 +5,7 @@ nixPkgs = ["python313"]
 cmds = ["pip install -r requirements.txt"]
 
 [phases.build]
-cmds = ["python manage.py collectstatic --no-input"]
+cmds = ["python manage.py collectstatic --no-input", "python manage.py migrate"]
 
 [start]
 cmd = "gunicorn config.wsgi"
