@@ -87,7 +87,7 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
 
 # Database — SQLite locally, PostgreSQL on Railway
-DATABASE_URL = os.environ.get('DATABASE_URL')
+DATABASE_URL = os.environ.get('DB_URL')
 
 if DATABASE_URL:
     DATABASES = {
