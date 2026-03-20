@@ -1,6 +1,6 @@
 from django.db import models
 from django.contrib.auth.models import User
-
+from pgvector.django import VectorField
 
 class AIRequest(models.Model):
     """Tracks every AI API call — tokens, cost, feature used"""
@@ -91,3 +91,29 @@ class Message(models.Model):
 
     def __str__(self):
         return f"{self.role}: {self.content[:50]}"
+    
+# ← DocumentChunk goes HERE, after Document is defined
+class DocumentChunk(models.Model):
+    document = models.ForeignKey(
+        Document, 
+        on_delete=models.CASCADE,
+        related_name='chunks'
+    )
+    content = models.TextField()
+    embedding = VectorField(dimensions=768)
+    chunk_index = models.IntegerField()
+    page_number = models.IntegerField(default=1)
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['chunk_index']
+        indexes = [
+            models.Index(
+                fields=['document'],
+                name='chunk_document_idx'
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.document.title} — chunk {self.chunk_index}"
