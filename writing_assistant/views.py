@@ -17,6 +17,8 @@ from .serializers import (
     AIRequestSerializer
 )
 from . import services
+from . import rag_service
+
 
 DAILY_REQUEST_LIMIT = 50
 
@@ -202,8 +204,7 @@ def documents(request):
         docs = Document.objects.filter(user=request.user)
         return Response(DocumentSerializer(docs, many=True).data)
 
-    # POST — upload counts against quota
-    allowed, count = check_quota(request.user)  # ← added
+    allowed, count = check_quota(request.user)
     if not allowed:
         return Response(
             {'error': f'Daily limit of {DAILY_REQUEST_LIMIT} requests reached.'},
@@ -226,7 +227,7 @@ def documents(request):
     )
 
     try:
-        chunk_count = services.process_document(document)
+        chunk_count = rag_service.process_document_pgvector(document)  # ← changed
         document.status = 'ready'
         document.chunk_count = chunk_count
         document.save()
@@ -242,14 +243,14 @@ def documents(request):
 @api_view(['DELETE'])
 def delete_document(request, pk):
     document = get_object_or_404(Document, pk=pk, user=request.user)
-    services.delete_document_vectors(document.id)
+    rag_service.delete_document_chunks(document.id)  # ← changed
     document.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(['POST'])
 def ask_document(request):
-    allowed, count = check_quota(request.user)  # ← added
+    allowed, count = check_quota(request.user)
     if not allowed:
         return Response(
             {'error': f'Daily limit of {DAILY_REQUEST_LIMIT} requests reached.'},
@@ -268,7 +269,7 @@ def ask_document(request):
         status='ready'
     )
 
-    result = services.answer_document_question(document, data['question'])
+    result = rag_service.answer_question_pgvector(document, data['question'])  # ← changed
     save_request(request.user, 'doc_qa', data['question'], result['answer'])
 
     return Response({
