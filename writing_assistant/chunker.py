@@ -143,6 +143,19 @@ def extract_from_md(file_path):
         'source': 'markdown'
     }]
 
+def extract_from_python(file_path):
+    """Extract Python code with function/class boundaries preserved"""
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+    return [{'text': content, 'page': 1, 'source': 'python'}]
+
+
+def extract_from_js(file_path):
+    """Extract JavaScript/TypeScript code"""
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+    return [{'text': content, 'page': 1, 'source': 'javascript'}]
+
 
 def extract_text(file_path):
     """
@@ -183,45 +196,6 @@ def extract_text(file_path):
             f"Unsupported file type: {ext}. "
             f"Supported: .pdf, .docx, .txt, .md, .xlsx, .xls, .csv"
         )
-
-
-def process_file(file_path, chunk_size=1000, chunk_overlap=200, include_images=True):
-    """
-    Main entry point — handles all supported file types.
-    Returns list of {text, metadata} dicts ready for embedding.
-    """
-    import os
-    from .table_processor import excel_to_chunks, csv_to_chunks
-
-    ext = os.path.splitext(file_path)[1].lower()
-
-    # Handle structured data directly
-    if ext in ['.xlsx', '.xls']:
-        logger.info("Processing Excel file")
-        return excel_to_chunks(file_path)
-
-    if ext == '.csv':
-        logger.info("Processing CSV file")
-        return csv_to_chunks(file_path)
-
-    # Handle text-based documents
-    pages, detected_ext = extract_text(file_path)
-    text_chunks = chunk_pages(pages, detected_ext, chunk_size, chunk_overlap)
-
-    # Optionally extract and describe images from PDFs
-    if ext == '.pdf' and include_images:
-        try:
-            from .image_processor import process_pdf_images
-            image_chunks = process_pdf_images(file_path)
-            if image_chunks:
-                logger.info(f"Adding {len(image_chunks)} image chunks")
-                text_chunks.extend(image_chunks)
-        except Exception as e:
-            # Image processing failure shouldn't fail the whole document
-            logger.warning(f"Image processing failed (non-fatal): {e}")
-
-    return text_chunks
-
 
 # ── Smart Chunking ────────────────────────────────────────────
 
@@ -325,16 +299,3 @@ def process_file(file_path, chunk_size=1000, chunk_overlap=200, include_images=F
             logger.warning(f"Image processing failed (non-fatal): {e}")
 
     return text_chunks
-
-def extract_from_python(file_path):
-    """Extract Python code with function/class boundaries preserved"""
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-    return [{'text': content, 'page': 1, 'source': 'python'}]
-
-
-def extract_from_js(file_path):
-    """Extract JavaScript/TypeScript code"""
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        content = f.read()
-    return [{'text': content, 'page': 1, 'source': 'javascript'}]
