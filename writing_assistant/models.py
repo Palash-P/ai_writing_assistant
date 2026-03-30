@@ -95,19 +95,19 @@ class Message(models.Model):
 # ← DocumentChunk goes HERE, after Document is defined
 class DocumentChunk(models.Model):
     document = models.ForeignKey(
-        Document, 
+        Document,
         on_delete=models.CASCADE,
         related_name='chunks'
     )
     content = models.TextField()
-    embedding = VectorField(dimensions=768)
-    chunk_index = models.IntegerField()
+    embedding = VectorField(dimensions=3072)
+    chunk_index = models.IntegerField(default=0)   # ← add this back
     page_number = models.IntegerField(default=1)
     metadata = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ['chunk_index']
+        ordering = ['chunk_index']   # ← now works because field exists
         indexes = [
             models.Index(
                 fields=['document'],
