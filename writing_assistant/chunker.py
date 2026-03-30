@@ -290,14 +290,41 @@ def chunk_pages(pages, ext, chunk_size=1000, chunk_overlap=200):
     return all_chunks
 
 
-def process_file(file_path, chunk_size=1000, chunk_overlap=200):
+def process_file(file_path, chunk_size=1000, chunk_overlap=200, include_images=False):
     """
-    Main entry point — extract and chunk any supported file.
+    Main entry point — handles all supported file types.
     Returns list of {text, metadata} dicts ready for embedding.
     """
-    pages, ext = extract_text(file_path)
-    chunks = chunk_pages(pages, ext, chunk_size, chunk_overlap)
-    return chunks
+    import os
+    from .table_processor import excel_to_chunks, csv_to_chunks
+
+    ext = os.path.splitext(file_path)[1].lower()
+
+    # Handle structured data directly — these return chunks immediately
+    if ext in ['.xlsx', '.xls']:
+        logger.info("Processing Excel file")
+        return excel_to_chunks(file_path)
+
+    if ext == '.csv':
+        logger.info("Processing CSV file")
+        return csv_to_chunks(file_path)
+
+    # Handle text-based documents
+    pages, detected_ext = extract_text(file_path)
+    text_chunks = chunk_pages(pages, detected_ext, chunk_size, chunk_overlap)
+
+    # Optionally extract and describe images from PDFs
+    if ext == '.pdf' and include_images:
+        try:
+            from .image_processor import process_pdf_images
+            image_chunks = process_pdf_images(file_path)
+            if image_chunks:
+                logger.info(f"Adding {len(image_chunks)} image chunks")
+                text_chunks.extend(image_chunks)
+        except Exception as e:
+            logger.warning(f"Image processing failed (non-fatal): {e}")
+
+    return text_chunks
 
 def extract_from_python(file_path):
     """Extract Python code with function/class boundaries preserved"""
