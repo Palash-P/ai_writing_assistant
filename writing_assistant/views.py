@@ -354,3 +354,35 @@ def usage_stats(request):
         'by_feature': by_feature,
         'recent': AIRequestSerializer(requests[:10], many=True).data
     })
+
+
+# ── Cross-Document Search ───────────────────────────────────────────────
+
+@api_view(['POST'])
+def search_documents(request):
+    """Search across ALL user documents at once"""
+    allowed, count = check_quota(request.user)
+    if not allowed:
+        return Response(
+            {'error': f'Daily limit of {DAILY_REQUEST_LIMIT} requests reached.'},
+            status=status.HTTP_429_TOO_MANY_REQUESTS
+        )
+
+    question = request.data.get('question', '').strip()
+    if not question:
+        return Response(
+            {'error': 'Question is required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
+    result = rag_service.answer_across_documents(request.user, question)
+    save_request(request.user, 'doc_qa', question, result['answer'])
+
+    return Response({
+        'question': question,
+        'answer': result['answer'],
+        'sources': result['sources'],
+        'searched_across': 'all documents',
+        'requests_today': count,
+        'daily_limit': DAILY_REQUEST_LIMIT,
+    })

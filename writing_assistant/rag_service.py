@@ -9,6 +9,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pgvector.django import CosineDistance
 from decouple import config
 from django.conf import settings
+from .chunker import process_file
 
 logger = logging.getLogger(__name__)
 
@@ -68,64 +69,43 @@ def extract_text_from_file(file_path):
 
 def process_document_pgvector(document):
     """
-    Full pipeline:
-    1. Extract text from file
-    2. Split into chunks
-    3. Create embedding for each chunk
-    4. Store chunks + embeddings in PostgreSQL via DocumentChunk model
-
-    This replaces process_document() which used ChromaDB
+    Full pipeline using smart chunking:
+    1. Extract text (supports PDF, DOCX, TXT, MD)
+    2. Smart chunk based on content type
+    3. Create embeddings in batch
+    4. Store in PostgreSQL with rich metadata
     """
     from .models import DocumentChunk
 
-    # Step 1: Extract text
-    pages = extract_text_from_file(document.file.path)
+    # Step 1 & 2: Extract and smart chunk
+    # process_file handles both extraction and chunking
+    chunks = process_file(document.file.path)
 
-    if not pages:
-        raise ValueError("No text could be extracted from this document")
+    if not chunks:
+        raise ValueError("No content could be extracted from this document")
 
-    # Step 2: Split into chunks
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
+    logger.info(f"Document {document.id}: {len(chunks)} smart chunks created")
 
-    all_chunks = []   # text strings
-    all_metadata = [] # page numbers etc
-
-    for page in pages:
-        chunks = splitter.split_text(page['text'])
-        for i, chunk in enumerate(chunks):
-            all_chunks.append(chunk)
-            all_metadata.append({'page': page['page'], 'index': i})
-
-    logger.info(f"Document {document.id}: created {len(all_chunks)} chunks")
-
-    # Step 3: Create embeddings
-    # embed_documents() takes a list of strings and returns a list of vectors
-    # We do this in one batch call — much faster than one call per chunk
+    # Step 3: Batch embed all chunks at once
     embeddings_model = get_embeddings()
-    logger.info(f"Creating embeddings for {len(all_chunks)} chunks...")
-    vectors = embeddings_model.embed_documents(all_chunks)
-    logger.info(f"Embeddings created successfully")
+    texts = [chunk['text'] for chunk in chunks]
+    logger.info(f"Creating {len(texts)} embeddings...")
+    vectors = embeddings_model.embed_documents(texts)
+    logger.info("Embeddings complete")
 
-    # Step 4: Save to PostgreSQL
-    # Delete any existing chunks for this document first (re-processing)
+    # Step 4: Delete old chunks and save new ones
     DocumentChunk.objects.filter(document=document).delete()
 
-    # bulk_create saves all chunks in ONE database query — very efficient
     chunk_objects = [
         DocumentChunk(
             document=document,
-            content=chunk,
-            embedding=vector,      # pgvector stores this as a vector type
+            content=chunk['text'],
+            embedding=vector,
             chunk_index=i,
-            page_number=meta['page'],
-            metadata=meta,
+            page_number=chunk['metadata']['page'],
+            metadata=chunk['metadata'],   # now includes word_count, content_type etc
         )
-        for i, (chunk, vector, meta) in enumerate(
-            zip(all_chunks, vectors, all_metadata)
-        )
+        for i, (chunk, vector) in enumerate(zip(chunks, vectors))
     ]
 
     DocumentChunk.objects.bulk_create(chunk_objects)
@@ -221,3 +201,63 @@ def delete_document_chunks(document_id):
         document_id=document_id
     ).delete()
     logger.info(f"Deleted {deleted_count} chunks for document {document_id}")
+
+# ── Cross-Document Search ────────────────────────────────────────────────
+
+def search_all_documents(user, question, top_k=5):
+    """
+    Search across ALL of a user's documents at once.
+    Returns the most relevant chunks regardless of which document they're from.
+
+    This is the power of pgvector + Django ORM:
+    One SQL query searches millions of vectors across all documents.
+    ChromaDB would require one query per collection (per document).
+    """
+    from .models import DocumentChunk
+
+    embeddings_model = get_embeddings()
+    query_vector = embeddings_model.embed_query(question)
+
+    # Filter by user's documents, search all at once
+    similar_chunks = (
+        DocumentChunk.objects
+        .filter(document__user=user, document__status='ready')
+        .annotate(distance=CosineDistance('embedding', query_vector))
+        .order_by('distance')
+        .select_related('document')   # fetch document info in same query
+        [:top_k]
+    )
+
+    return similar_chunks
+
+
+def answer_across_documents(user, question):
+    """
+    Answer a question by searching across all user's documents.
+    Returns answer + which document(s) it came from.
+    """
+    similar_chunks = search_all_documents(user, question, top_k=5)
+
+    if not similar_chunks:
+        return {
+            'answer': "No relevant content found across your documents.",
+            'sources': []
+        }
+
+    context = "\n\n---\n\n".join([chunk.content for chunk in similar_chunks])
+
+    sources = [
+        {
+            'document_title': chunk.document.title,
+            'document_id': chunk.document.id,
+            'text': chunk.content[:150] + "...",
+            'page': chunk.page_number,
+            'distance': round(float(chunk.distance), 4),
+        }
+        for chunk in similar_chunks
+    ]
+
+    chain = RAG_PROMPT | get_llm() | parser
+    answer = chain.invoke({"context": context, "question": question})
+
+    return {'answer': answer, 'sources': sources}

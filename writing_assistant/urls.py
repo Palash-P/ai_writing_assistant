@@ -16,9 +16,10 @@ urlpatterns = [
     path('blog/',      views.generate_blog,  name='blog'),
 
     # Document RAG
-    path('docs/',              views.documents,       name='documents'),
-    path('docs/<int:pk>/',     views.delete_document, name='delete-document'),
-    path('docs/ask/',          views.ask_document,    name='ask-document'),
+    path('docs/',              views.documents,        name='documents'),
+    path('docs/<int:pk>/',     views.delete_document,  name='delete-document'),
+    path('docs/ask/',          views.ask_document,     name='ask-document'),
+    path('docs/search/',       views.search_documents, name='search-documents'),
 
     # Chat
     path('conversations/',           views.conversations,       name='conversations'),
