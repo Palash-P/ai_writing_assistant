@@ -1,4 +1,5 @@
 # writing_assistant/views.py
+import os
 import datetime
 from rest_framework.decorators import api_view, permission_classes, parser_classes
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
@@ -218,6 +219,15 @@ def documents(request):
 
     if not file:
         return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+    
+    allowed_extensions = ['.pdf', '.docx', '.txt', '.md', '.xlsx', '.xls', '.csv']
+    file_ext = os.path.splitext(file.name)[1].lower()
+    if file_ext not in allowed_extensions:
+        return Response(
+            {'error': f'Unsupported file type. Allowed: {allowed_extensions}'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
     if not title:
         title = file.name
 

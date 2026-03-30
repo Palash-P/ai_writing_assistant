@@ -147,42 +147,103 @@ def extract_from_md(file_path):
 def extract_text(file_path):
     """
     Route to the right extractor based on file extension.
-    Returns list of {text, page, source} dicts.
+    Now supports: PDF, DOCX, TXT, MD, XLSX, XLS, CSV
     """
     import os
     ext = os.path.splitext(file_path)[1].lower()
 
     extractors = {
-        '.pdf':  extract_from_pdf,
-        '.docx': extract_from_docx,
-        '.doc':  extract_from_docx,
-        '.txt':  extract_from_txt,
-        '.md':   extract_from_md,
-    }
+    '.pdf':  extract_from_pdf,
+    '.docx': extract_from_docx,
+    '.doc':  extract_from_docx,
+    '.txt':  extract_from_txt,
+    '.md':   extract_from_md,
+    '.py':   extract_from_python,
+    '.js':   extract_from_js,
+    '.ts':   extract_from_js,
+    '.dart': extract_from_txt,   
+}
 
-    if ext not in extractors:
-        raise ValueError(f"Unsupported file type: {ext}. Supported: {list(extractors.keys())}")
+    if ext in extractors:
+        pages = extractors[ext](file_path)
+        if not pages or not any(p['text'] for p in pages):
+            raise ValueError("No text could be extracted from this file")
+        logger.info(f"Extracted {len(pages)} pages from {ext} file")
+        return pages, ext
 
-    pages = extractors[ext](file_path)
+    # Structured data — handled differently (returns chunks directly)
+    elif ext in ['.xlsx', '.xls']:
+        return None, ext   # signal to process_file to use table processor
 
-    if not pages or not any(p['text'] for p in pages):
-        raise ValueError("No text could be extracted from this file")
+    elif ext == '.csv':
+        return None, ext
 
-    logger.info(f"Extracted {len(pages)} pages from {ext} file")
-    return pages, ext
+    else:
+        raise ValueError(
+            f"Unsupported file type: {ext}. "
+            f"Supported: .pdf, .docx, .txt, .md, .xlsx, .xls, .csv"
+        )
+
+
+def process_file(file_path, chunk_size=1000, chunk_overlap=200, include_images=True):
+    """
+    Main entry point — handles all supported file types.
+    Returns list of {text, metadata} dicts ready for embedding.
+    """
+    import os
+    from .table_processor import excel_to_chunks, csv_to_chunks
+
+    ext = os.path.splitext(file_path)[1].lower()
+
+    # Handle structured data directly
+    if ext in ['.xlsx', '.xls']:
+        logger.info("Processing Excel file")
+        return excel_to_chunks(file_path)
+
+    if ext == '.csv':
+        logger.info("Processing CSV file")
+        return csv_to_chunks(file_path)
+
+    # Handle text-based documents
+    pages, detected_ext = extract_text(file_path)
+    text_chunks = chunk_pages(pages, detected_ext, chunk_size, chunk_overlap)
+
+    # Optionally extract and describe images from PDFs
+    if ext == '.pdf' and include_images:
+        try:
+            from .image_processor import process_pdf_images
+            image_chunks = process_pdf_images(file_path)
+            if image_chunks:
+                logger.info(f"Adding {len(image_chunks)} image chunks")
+                text_chunks.extend(image_chunks)
+        except Exception as e:
+            # Image processing failure shouldn't fail the whole document
+            logger.warning(f"Image processing failed (non-fatal): {e}")
+
+    return text_chunks
 
 
 # ── Smart Chunking ────────────────────────────────────────────
 
 def detect_content_type(ext, text_sample):
-    """
-    Detect what kind of content this is so we use the right splitter.
-    """
-    if ext == '.md':
-        return 'markdown'
+    """Detect content type from extension and content sample"""
+    ext_map = {
+        '.md':   'markdown',
+        '.py':   'code',
+        '.js':   'code',
+        '.ts':   'code',
+        '.dart': 'code',
+    }
 
-    # Check if the text looks like code
-    code_indicators = ['def ', 'class ', 'import ', 'function ', 'const ', 'var ']
+    if ext in ext_map:
+        return ext_map[ext]
+
+    # Check if content looks like code
+    code_indicators = [
+        'def ', 'class ', 'import ', 'from ',  # Python
+        'function ', 'const ', 'let ', 'var ',  # JavaScript
+        'public ', 'private ', 'void ',         # Java/Dart
+    ]
     if any(indicator in text_sample for indicator in code_indicators):
         return 'code'
 
@@ -237,3 +298,16 @@ def process_file(file_path, chunk_size=1000, chunk_overlap=200):
     pages, ext = extract_text(file_path)
     chunks = chunk_pages(pages, ext, chunk_size, chunk_overlap)
     return chunks
+
+def extract_from_python(file_path):
+    """Extract Python code with function/class boundaries preserved"""
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+    return [{'text': content, 'page': 1, 'source': 'python'}]
+
+
+def extract_from_js(file_path):
+    """Extract JavaScript/TypeScript code"""
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        content = f.read()
+    return [{'text': content, 'page': 1, 'source': 'javascript'}]
