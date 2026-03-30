@@ -22,9 +22,11 @@ urlpatterns = [
     path('docs/search/',       views.search_documents, name='search-documents'),
 
     # Chat
-    path('conversations/',           views.conversations,       name='conversations'),
-    path('conversations/<int:pk>/',  views.conversation_detail, name='conversation-detail'),
-    path('chat/',                    views.chat,                name='chat'),
+    path('conversations/',                views.conversations,       name='conversations'),
+    path('conversations/<int:pk>/',       views.conversation_detail, name='conversation-detail'),
+    path('chat/',                         views.chat,                name='chat'),
+    path('conversations/<int:pk>/stats/', views.conversation_stats,  name='conversation-stats'),
+
 
     # Usage
     path('usage/', views.usage_stats, name='usage-stats'),

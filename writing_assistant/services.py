@@ -12,6 +12,7 @@ from decouple import config
 from django.conf import settings
 import hashlib
 from django.core.cache import cache
+from .memory import build_history_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -354,23 +355,33 @@ CHAT_PROMPT = ChatPromptTemplate.from_messages([
 
 
 def chat_response(conversation, user_message):
-    """Load history from DB → get response → save both messages"""
-    # Build history in LangChain format
-    history = [
-        HumanMessage(content=m.content) if m.role == 'user'
-        else AIMessage(content=m.content)
-        for m in conversation.messages.all()
-    ]
+    """
+    Send a message with smart history management.
+    Uses summarization for long conversations.
+    """
+    # Build history using smart memory management
+    # instead of loading ALL messages every time
+    history = build_history_for_llm(conversation)
 
     chain = CHAT_PROMPT | get_llm() | parser
-    response = chain.invoke({"history": history, "message": user_message})
+    response = chain.invoke({
+        "history": history,
+        "message": user_message
+    })
 
-    # Save both messages
+    # Save both messages to database
     from .models import Message
-    Message.objects.create(conversation=conversation, role='user', content=user_message)
-    Message.objects.create(conversation=conversation, role='assistant', content=response)
+    Message.objects.create(
+        conversation=conversation,
+        role='user',
+        content=user_message
+    )
+    Message.objects.create(
+        conversation=conversation,
+        role='assistant',
+        content=response
+    )
 
-    # Update conversation title from first message
     if conversation.title == 'New Conversation':
         conversation.title = user_message[:60]
         conversation.save()

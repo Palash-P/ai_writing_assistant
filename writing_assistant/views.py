@@ -18,6 +18,8 @@ from .serializers import (
 )
 from . import services
 from . import rag_service
+from .memory import get_conversation_stats
+
 
 
 DAILY_REQUEST_LIMIT = 50
@@ -269,7 +271,8 @@ def ask_document(request):
         status='ready'
     )
 
-    result = rag_service.answer_question_pgvector(document, data['question'])  # ← changed
+    # ← use hybrid search instead of pure vector search
+    result = rag_service.answer_question_hybrid(document, data['question'])
     save_request(request.user, 'doc_qa', data['question'], result['answer'])
 
     return Response({
@@ -280,7 +283,6 @@ def ask_document(request):
         'requests_today': count,
         'daily_limit': DAILY_REQUEST_LIMIT,
     })
-
 
 # ── Feature 6: Chat with Memory ───────────────────────────────
 
@@ -305,6 +307,13 @@ def conversation_detail(request, pk):
     conversation.title = 'New Conversation'
     conversation.save()
     return Response({'message': 'Conversation cleared'})
+
+@api_view(['GET'])
+def conversation_stats(request, pk):
+    """See memory usage for a conversation"""
+    conversation = get_object_or_404(Conversation, pk=pk, user=request.user)
+    stats = get_conversation_stats(conversation)
+    return Response(stats)
 
 
 @api_view(['POST'])
