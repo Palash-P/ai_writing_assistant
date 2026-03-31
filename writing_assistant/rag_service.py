@@ -116,12 +116,10 @@ def process_document_pgvector(document):
 
     # Step 3: Batch embed all chunks at once
     embeddings_model = get_embeddings()
-    print(f"Embedding model: {embeddings_model.model}") 
     texts = [chunk['text'] for chunk in chunks]
     logger.info(f"Creating {len(texts)} embeddings...")
     vectors = embeddings_model.embed_documents(texts)
     logger.info("Embeddings complete")
-    print(f"Vector dimensions: {len(vectors[0])}")
 
     # Step 4: Delete old chunks and save new ones
     DocumentChunk.objects.filter(document=document).delete()
