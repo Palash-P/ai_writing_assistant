@@ -294,6 +294,75 @@ def ask_document(request):
         'daily_limit': DAILY_REQUEST_LIMIT,
     })
 
+@api_view(['POST'])
+def ask_document_v2(request):
+    """
+    Enhanced document Q&A with citations, confidence, and follow-up questions.
+    Production-grade version of ask_document.
+    """
+    allowed, count = check_quota(request.user)
+    if not allowed:
+        return Response(
+            {'error': f'Daily limit of {DAILY_REQUEST_LIMIT} requests reached.'},
+            status=status.HTTP_429_TOO_MANY_REQUESTS
+        )
+
+    serializer = AskDocumentSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    data = serializer.validated_data
+    document = get_object_or_404(
+        Document,
+        pk=data['document_id'],
+        user=request.user,
+        status='ready'
+    )
+
+    question = data['question']
+
+    # Rewrite vague questions for better retrieval
+    rewritten_question = rag_service.rewrite_query(question)
+
+    # Get answer with full citations
+    result = rag_service.answer_with_citations(document, rewritten_question)
+
+     # Hallucination check
+    chunks = rag_service.hybrid_search(document, rewritten_question, top_k=4)
+    hallucination_check = rag_service.detect_hallucination(result['answer'], chunks)
+
+    save_request(request.user, 'doc_qa', question, result['answer'])
+
+    return Response({
+        'question': question,
+        'rewritten_question': rewritten_question if rewritten_question != question else None,
+        'answer': result['answer'],
+        'confidence': result['confidence'],
+        'confidence_label': result['confidence_label'],
+        'citations': result['citations'],
+        'follow_up_questions': result['follow_up_questions'],
+        'hallucination_check': hallucination_check,
+        'document': document.title,
+        'requests_today': count,
+        'daily_limit': DAILY_REQUEST_LIMIT,
+    })
+
+
+@api_view(['POST'])
+def rewrite_question(request):
+    """Preview how a question will be rewritten before asking"""
+    question = request.data.get('question', '').strip()
+    if not question:
+        return Response({'error': 'Question required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    rewritten = rag_service.rewrite_query(question)
+    return Response({
+        'original': question,
+        'rewritten': rewritten,
+        'was_rewritten': rewritten != question,
+    })
+
+
 # ── Feature 6: Chat with Memory ───────────────────────────────
 
 @api_view(['GET', 'POST'])

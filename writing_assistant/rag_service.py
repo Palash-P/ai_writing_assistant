@@ -11,7 +11,8 @@ from decouple import config
 from django.conf import settings
 from .chunker import process_file
 from django.db.models import Q
-
+import hashlib
+from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,31 @@ def get_embeddings():
         model='models/gemini-embedding-001',
         google_api_key=config('GEMINI_API_KEY')
     )
+
+def get_cached_embedding(text, embeddings_model):
+    """
+    Cache embeddings to avoid redundant API calls.
+
+    When is this useful?
+    - Same question asked multiple times
+    - Similar questions with same keywords
+    - Document re-processing after minor edits
+
+    Cache key = MD5 hash of the text (same text = same hash = same cache)
+    Cache TTL = 24 hours (embeddings don't change)
+    """
+    cache_key = f"emb_{hashlib.md5(text.encode()).hexdigest()}"
+
+    cached = cache.get(cache_key)
+    if cached is not None:
+        logger.info(f"Embedding cache hit for: {text[:50]}...")
+        return cached
+
+    # Not cached — call API
+    vector = embeddings_model.embed_query(text)
+    cache.set(cache_key, vector, timeout=86400)  # cache for 24 hours
+    return vector
+
 
 parser = StrOutputParser()
 
@@ -135,7 +161,7 @@ def search_similar_chunks(document, question, top_k=4):
 
     # Embed the question
     embeddings_model = get_embeddings()
-    query_vector = embeddings_model.embed_query(question)
+    query_vector = get_cached_embedding(question, embeddings_model)
 
     # CosineDistance annotates each chunk with its distance to the query
     # order_by('distance') puts closest (most relevant) first
@@ -467,3 +493,312 @@ def select_chunks_within_budget(chunks, token_budget=2000):
 
     logger.info(f"Selected {len(selected)} chunks using ~{tokens_used} tokens")
     return selected
+
+# ── Enhanced Citation System ────────────────────────────────────────────────
+
+def calculate_confidence(chunks):
+    """
+    Calculate confidence score based on chunk distances.
+
+    How it works:
+    - CosineDistance 0.0 = perfect match (identical meaning)
+    - CosineDistance 1.0 = completely unrelated
+    - We convert distance to a 0-100% confidence score
+
+    Multiple close matches = higher confidence
+    All chunks far away  = lower confidence
+
+    This is approximate — not a probability, but a useful signal.
+    """
+    if not chunks:
+        return 0.0
+
+    # Convert distances to similarity scores (1 - distance)
+    # Distance 0.3 → similarity 0.7 → 70%
+    similarities = [
+        max(0, 1 - float(chunk.distance))
+        for chunk in chunks
+    ]
+
+    # Weight: best match counts most, others contribute less
+    if len(similarities) == 1:
+        confidence = similarities[0]
+    else:
+        # Best chunk = 60% weight, remaining = 40% split evenly
+        best = similarities[0]
+        rest = sum(similarities[1:]) / len(similarities[1:])
+        confidence = (best * 0.6) + (rest * 0.4)
+
+    return round(confidence * 100, 1)  # return as percentage
+
+
+def extract_relevant_snippet(chunk_content, question, snippet_length=200):
+    """
+    Find the most relevant sentence within a chunk for citation display.
+
+    Instead of showing the first 200 chars of a chunk (which might not
+    be the relevant part), find the sentence that best answers the question.
+    """
+    sentences = chunk_content.replace('\n', ' ').split('. ')
+    question_words = set(question.lower().split())
+
+    best_sentence = sentences[0]
+    best_score = 0
+
+    for sentence in sentences:
+        sentence_words = set(sentence.lower().split())
+        # Score = overlap between question words and sentence words
+        overlap = len(question_words & sentence_words)
+        if overlap > best_score:
+            best_score = overlap
+            best_sentence = sentence
+
+    # Return snippet, truncated to snippet_length
+    snippet = best_sentence.strip()
+    if len(snippet) > snippet_length:
+        snippet = snippet[:snippet_length] + "..."
+
+    return snippet
+
+
+def build_citations(chunks, question):
+    """
+    Build rich citation objects from retrieved chunks.
+    Each citation tells the user exactly where the answer came from.
+    """
+    citations = []
+
+    for i, chunk in enumerate(chunks):
+        snippet = extract_relevant_snippet(chunk.content, question)
+
+        citation = {
+            'citation_number': i + 1,
+            'document': chunk.document.title if hasattr(chunk, 'document') else 'Unknown',
+            'page': chunk.page_number,
+            'relevance_score': round((1 - float(chunk.distance)) * 100, 1),
+            'snippet': snippet,
+            'full_text': chunk.content,
+            'chunk_type': chunk.metadata.get('content_type', 'text'),
+        }
+        citations.append(citation)
+
+    return citations
+
+
+def answer_with_citations(document, question):
+    """
+    Full RAG pipeline with citations and confidence scores.
+    This is the production-grade version of answer_question_hybrid.
+    """
+    # Step 1: Hybrid search (vector + keyword)
+    chunks = hybrid_search(document, question, top_k=5)
+
+    if not chunks:
+        return {
+            'answer': "I couldn't find relevant information in this document.",
+            'citations': [],
+            'confidence': 0.0,
+            'follow_up_questions': [],
+        }
+
+    # Step 2: Token budget management
+    final_chunks = select_chunks_within_budget(chunks, token_budget=2000)
+
+    # Step 3: Build context with citation markers
+    context_parts = []
+    for i, chunk in enumerate(final_chunks):
+        # Add [1], [2], [3] markers so AI can reference them
+        context_parts.append(f"[{i+1}] {chunk.content}")
+
+    context = "\n\n".join(context_parts)
+
+    # Step 4: Generate answer with citation instructions
+    citation_prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are a precise document assistant.
+Answer the question using ONLY the provided context.
+When you use information, reference it with [1], [2], etc.
+
+Rules:
+- Only use information from the numbered context sections
+- Add [N] after each fact you use
+- If the answer is not in the context, say exactly:
+  "I couldn't find information about this in the document."
+- Be concise and direct"""),
+        ("user", """Context:
+{context}
+
+Question: {question}
+
+Answer (with citation numbers):""")
+    ])
+
+    chain = citation_prompt | get_llm(temperature=0.1) | parser
+    answer = chain.invoke({"context": context, "question": question})
+
+    # Step 5: Calculate confidence
+    confidence = calculate_confidence(final_chunks)
+
+    # Step 6: Build citations
+    citations = build_citations(final_chunks, question)
+
+    # Step 7: Generate follow-up questions
+    follow_ups = generate_follow_up_questions(question, answer, document.title)
+
+    return {
+        'answer': answer,
+        'citations': citations,
+        'confidence': confidence,
+        'confidence_label': get_confidence_label(confidence),
+        'follow_up_questions': follow_ups,
+    }
+
+
+def get_confidence_label(confidence):
+    """Convert confidence percentage to human-readable label"""
+    if confidence >= 85:
+        return 'High'
+    elif confidence >= 60:
+        return 'Medium'
+    elif confidence >= 35:
+        return 'Low'
+    else:
+        return 'Very Low — answer may not be in document'
+
+
+def generate_follow_up_questions(question, answer, document_title):
+    """
+    Generate 3 related questions the user might want to ask next.
+    Helps users explore the document without knowing what's in it.
+    """
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """Generate exactly 3 short follow-up questions based on
+the original question and answer. Questions should help explore related topics.
+Return ONLY the 3 questions, one per line, no numbering, no explanation."""),
+        ("user", f"""Document: {document_title}
+Original question: {question}
+Answer received: {answer[:300]}
+
+3 follow-up questions:""")
+    ])
+
+    chain = prompt | get_llm(temperature=0.7) | parser
+
+    try:
+        result = chain.invoke({})
+        questions = [q.strip() for q in result.strip().split('\n') if q.strip()]
+        return questions[:3]  # ensure max 3
+    except Exception:
+        return []  # follow-ups are optional, don't fail if this errors
+    
+# ── Hallucination Detection ────────────────────────────────────────────────
+def detect_hallucination(answer, chunks):
+    """
+    Basic hallucination detection — check if the answer
+    is grounded in the retrieved chunks.
+
+    How it works:
+    - Extract key claims from the answer
+    - Check if those claims appear in any chunk
+    - If answer contains facts not in chunks → possible hallucination
+
+    This is a simple heuristic, not perfect, but catches obvious cases.
+    """
+    if not chunks or not answer:
+        return {'hallucination_risk': 'unknown', 'grounded': False}
+
+    # Combine all chunk content
+    all_chunk_text = ' '.join(chunk.content.lower() for chunk in chunks)
+
+    # Check if AI said "I couldn't find" — that's a good sign it's honest
+    honest_indicators = [
+        "couldn't find",
+        "not in the document",
+        "not mentioned",
+        "no information",
+        "i don't know",
+    ]
+
+    if any(indicator in answer.lower() for indicator in honest_indicators):
+        return {
+            'hallucination_risk': 'Low',
+            'grounded': True,
+            'note': 'AI correctly acknowledged missing information'
+        }
+
+    # Extract numbers and specific claims from the answer
+    # If answer has specific numbers/dates not in context — red flag
+    import re
+    answer_numbers = set(re.findall(r'\b\d+(?:\.\d+)?\b', answer))
+    chunk_numbers = set(re.findall(r'\b\d+(?:\.\d+)?\b', all_chunk_text))
+
+    ungrounded_numbers = answer_numbers - chunk_numbers
+
+    if len(ungrounded_numbers) > 2:
+        return {
+            'hallucination_risk': 'Medium',
+            'grounded': False,
+            'note': f'Answer contains numbers not found in source: {ungrounded_numbers}'
+        }
+
+    return {
+        'hallucination_risk': 'Low',
+        'grounded': True,
+        'note': 'Answer appears grounded in source material'
+    }
+
+def rewrite_query(question, conversation_history=None):
+    """
+    Rewrite vague or ambiguous questions for better retrieval.
+
+    Examples:
+    "Tell me more about it"  →  "What are the key details of the topic discussed?"
+    "What about the cost?"   →  "What is the cost or pricing information?"
+    "Explain that"           →  "Explain the main concept mentioned in the document"
+
+    Also handles follow-up questions that reference previous context:
+    "And what about the second option?" → "What is the second option mentioned?"
+    """
+    # Skip rewriting for clear, specific questions
+    vague_indicators = [
+        'tell me more', 'explain that', 'what about', 'and the',
+        'more details', 'elaborate', 'what do you mean', 'it ', 'that ',
+        'this ', 'they ', 'them '
+    ]
+
+    is_vague = (
+        len(question.split()) < 5 or
+        any(indicator in question.lower() for indicator in vague_indicators)
+    )
+
+    if not is_vague:
+        return question  # clear question, no rewriting needed
+
+    context = ""
+    if conversation_history:
+        # Include last 2 exchanges for context
+        recent = conversation_history[-4:]
+        context = "\n".join([
+            f"{'User' if i % 2 == 0 else 'AI'}: {msg}"
+            for i, msg in enumerate(recent)
+        ])
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """Rewrite the user's question to be more specific and searchable.
+Make it standalone (no pronouns like 'it', 'that', 'they').
+Return ONLY the rewritten question, nothing else."""),
+        ("user", f"""Previous context:
+{context}
+
+Original question: {question}
+
+Rewritten question:""")
+    ])
+
+    chain = prompt | get_llm(temperature=0.0) | parser
+
+    try:
+        rewritten = chain.invoke({}).strip()
+        logger.info(f"Query rewritten: '{question}' → '{rewritten}'")
+        return rewritten
+    except Exception:
+        return question  # fallback to original if rewriting fails

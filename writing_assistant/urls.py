@@ -15,11 +15,13 @@ urlpatterns = [
     path('summarize/', views.summarize,      name='summarize'),
     path('blog/',      views.generate_blog,  name='blog'),
 
-    # Document RAG
-    path('docs/',              views.documents,        name='documents'),
-    path('docs/<int:pk>/',     views.delete_document,  name='delete-document'),
-    path('docs/ask/',          views.ask_document,     name='ask-document'),
-    path('docs/search/',       views.search_documents, name='search-documents'),
+    # Document 
+    path('docs/',           views.documents,        name='documents'),
+    path('docs/ask/',       views.ask_document,     name='ask-document'),
+    path('docs/ask/v2/',    views.ask_document_v2,  name='ask-document-v2'),     
+    path('docs/search/',    views.search_documents, name='search-documents'),
+    path('docs/rewrite/',   views.rewrite_question, name='rewrite-question'),   
+    path('docs/<int:pk>/',  views.delete_document,  name='delete-document'),
 
     # Chat
     path('conversations/',                views.conversations,       name='conversations'),
